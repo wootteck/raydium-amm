@@ -15,7 +15,7 @@ use crate::{
     state::{
         AmmConfig, AmmInfo, AmmParams, AmmResetFlag, AmmState, AmmStatus, GetPoolData,
         GetSwapBaseInData, GetSwapBaseOutData, Loadable, RunCrankData, SimulateParams,
-        TargetOrders, MAX_ORDER_LIMIT, TEN_THOUSAND,
+        PriceStore, TargetOrders, MAX_ORDER_LIMIT, TEN_THOUSAND,
     },
 };
 
@@ -123,6 +123,10 @@ pub const PC_VAULT_ASSOCIATED_SEED: &'static [u8] = b"pc_vault_associated_seed";
 pub const LP_MINT_ASSOCIATED_SEED: &'static [u8] = b"lp_mint_associated_seed";
 /// Amm config seed
 pub const AMM_CONFIG_SEED: &'static [u8] = b"amm_config_account_seed";
+/// Price store seed
+pub const PRICE_STORE_SEED: &'static [u8] = b"price_store_account_seed";
+/// Price scale
+pub const PRICE_SCALE: u64 = 100000000;
 
 pub fn get_associated_address_and_bump_seed(
     info_id: &Pubkey,
@@ -317,6 +321,64 @@ impl Processor {
             ask_best_price = Some(asks_orders.last().unwrap().price().get());
         }
         Ok((bid_best_price, ask_best_price))
+    }
+
+    /// Calculate dynamic fee based on current price and TWAP
+    pub fn calculate_dynamic_fee(
+        price_store: &PriceStore,
+        current_timestamp: u64,
+        total_pc_amount: u64,
+        total_coin_amount: u64,
+        swap_fee_denominator: u64,
+    ) -> (u64, u64) {
+        let current_price = if total_coin_amount == 0 { 0 } else {
+            (total_pc_amount as u128)
+            .checked_mul(PRICE_SCALE as u128)
+            .unwrap_or(0)
+            .checked_div(total_coin_amount as u128)
+            .unwrap_or(0) as u64
+        };
+
+        // Calculate current TWAP using the formula:
+        // (last_twap_price * twap_period + (current_time - last_timestamp) * current_price) / 
+        // (twap_period + (current_time - last_timestamp))
+        let time_diff = current_timestamp.saturating_sub(price_store.last_timestamp);
+        let total_period = price_store.twap_period.saturating_add(time_diff);
+        
+        if total_period == 0 {
+            return (5 * swap_fee_denominator / 10000, current_price); // Default to 0.05% if no period
+        }
+
+        let weighted_price = (price_store.last_twap_price as u128)
+            .checked_mul(price_store.twap_period as u128)
+            .unwrap_or(0)
+            .checked_add((current_price as u128).checked_mul(time_diff as u128).unwrap_or(0))
+            .unwrap_or(0);
+        
+        let twap_price = (weighted_price / total_period as u128) as u64;
+
+        // Calculate volatility as percentage
+        let volatility = if twap_price > 0 {
+            let price_diff = if current_price > twap_price {
+                current_price - twap_price
+            } else {
+                twap_price - current_price
+            };
+            (price_diff as f64 * 100.0) / twap_price as f64
+        } else {
+            0.0
+        };
+
+        // Set fee based on volatility thresholds
+        let fee_bips = if volatility < 0.5 {
+            5 // 0.05%
+        } else if volatility < 1.5 {
+            30 // 0.3%
+        } else {
+            100 // 1%
+        };
+
+        (fee_bips * swap_fee_denominator / 10000, twap_price)
     }
 
     /// The Detailed calculation of pnl
@@ -853,6 +915,8 @@ impl Processor {
         let amm_config_info = next_account_info(account_info_iter)?;
         let create_fee_destination_info = next_account_info(account_info_iter)?;
 
+        let price_store = next_account_info(account_info_iter)?;
+
         let market_program_info = next_account_info(account_info_iter)?;
         let market_info = next_account_info(account_info_iter)?;
 
@@ -864,6 +928,11 @@ impl Processor {
         let (pda, _) = Pubkey::find_program_address(&[&AMM_CONFIG_SEED], program_id);
         if pda != *amm_config_info.key || amm_config_info.owner != program_id {
             return Err(AmmError::InvalidConfigAccount.into());
+        }
+
+        let (pda1, _) = Pubkey::find_program_address(&[&PRICE_STORE_SEED], program_id);
+        if pda1 != *price_store.key || price_store.owner != program_id {
+            return Err(AmmError::InvalidPriceStoreAccount.into());
         }
 
         msg!(arrform!(LOG_SIZE, "initialize2: {:?}", init).as_str());
@@ -2246,6 +2315,8 @@ impl Processor {
         let market_pc_vault_info = next_account_info(account_info_iter)?;
         let market_vault_signer = next_account_info(account_info_iter)?;
 
+        let price_store = next_account_info(account_info_iter)?;
+
         let user_source_info = next_account_info(account_info_iter)?;
         let user_destination_info = next_account_info(account_info_iter)?;
         let user_source_owner = next_account_info(account_info_iter)?;
@@ -2390,12 +2461,26 @@ impl Processor {
             });
             return Err(AmmError::InsufficientFunds.into());
         }
+        // Deduct fee here!!!
+        let mut price_store_data = PriceStore::load_mut_checked(&price_store, program_id)?;
+        let clock = Clock::get()?;
+        let (swap_fee_percentage, twap_price) = Self::calculate_dynamic_fee(
+            &price_store_data,
+            clock.unix_timestamp as u64,
+            total_pc_without_take_pnl,
+            total_coin_without_take_pnl,
+            amm.fees.swap_fee_denominator
+        );
         let swap_fee = U128::from(swap.amount_in)
-            .checked_mul(amm.fees.swap_fee_numerator.into())
+            .checked_mul(swap_fee_percentage.into())
             .unwrap()
             .checked_ceil_div(amm.fees.swap_fee_denominator.into())
             .unwrap()
             .0;
+        // Update price store
+        price_store_data.twap_period += clock.unix_timestamp as u64 - price_store_data.last_timestamp;
+        price_store_data.last_twap_price = twap_price;
+        price_store_data.last_timestamp = clock.unix_timestamp as u64;
         let swap_in_after_deduct_fee = U128::from(swap.amount_in).checked_sub(swap_fee).unwrap();
         let swap_amount_out = Calculator::swap_token_amount_base_in(
             swap_in_after_deduct_fee,
@@ -2657,6 +2742,8 @@ impl Processor {
         let market_pc_vault_info = next_account_info(account_info_iter)?;
         let market_vault_signer = next_account_info(account_info_iter)?;
 
+        let price_store = next_account_info(account_info_iter)?;
+
         let user_source_info = next_account_info(account_info_iter)?;
         let user_destination_info = next_account_info(account_info_iter)?;
         let user_source_owner = next_account_info(account_info_iter)?;
@@ -2791,6 +2878,20 @@ impl Processor {
         } else {
             return Err(AmmError::InvalidUserToken.into());
         }
+        // Deduct fee here!!!
+        let mut price_store_data = PriceStore::load_mut_checked(&price_store, program_id)?;
+        let clock = Clock::get()?;
+        let (swap_fee_percentage, twap_price) = Self::calculate_dynamic_fee(
+            &price_store_data,
+            clock.unix_timestamp as u64,
+            total_pc_without_take_pnl,
+            total_coin_without_take_pnl,
+            amm.fees.swap_fee_denominator
+        );
+        // Update price store
+        price_store_data.twap_period += clock.unix_timestamp as u64 - price_store_data.last_timestamp;
+        price_store_data.last_twap_price = twap_price;
+        price_store_data.last_timestamp = clock.unix_timestamp as u64;
 
         let swap_in_before_add_fee = Calculator::swap_token_amount_base_out(
             swap.amount_out.into(),
@@ -2801,7 +2902,7 @@ impl Processor {
         // swap_in_after_add_fee * (1 - 0.0025) = swap_in_before_add_fee
         // swap_in_after_add_fee = swap_in_before_add_fee / (1 - 0.0025)
         let swap_in_after_add_fee = swap_in_before_add_fee
-            .checked_mul(amm.fees.swap_fee_denominator.into())
+            .checked_mul(swap_fee_percentage.into())
             .unwrap()
             .checked_ceil_div(
                 (amm.fees
@@ -3291,7 +3392,7 @@ impl Processor {
         Ok(())
     }
 
-    /// withdraw_srm
+    /// withdraw_srmprocess_swap_base_out
     pub fn process_withdraw_srm(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
@@ -3520,6 +3621,8 @@ impl Processor {
         let market_info = next_account_info(account_info_iter)?;
         let market_event_queue_info = next_account_info(account_info_iter)?;
 
+        let price_store = next_account_info(account_info_iter)?;
+
         let user_source_info = next_account_info(account_info_iter)?;
         let user_destination_info = next_account_info(account_info_iter)?;
         let user_source_owner = next_account_info(account_info_iter)?;
@@ -3658,8 +3761,19 @@ impl Processor {
             swap_base_in.pool_data.pool_coin_amount = total_coin_without_take_pnl;
             swap_base_in.pool_data.amm_id = amm_info.key.to_string();
 
+            // Deduct fee here!!!
+            let price_store_data = PriceStore::load_checked(&price_store, program_id)?;
+            let clock = Clock::get()?;
+            let (swap_fee_percentage, _twap_price) = Self::calculate_dynamic_fee(
+                &price_store_data,
+                clock.unix_timestamp as u64,
+                total_pc_without_take_pnl,
+                total_coin_without_take_pnl,
+                amm.fees.swap_fee_denominator
+            );
+
             let swap_fee = U128::from(swap.amount_in)
-                .checked_mul(amm.fees.swap_fee_numerator.into())
+                .checked_mul(swap_fee_percentage.into())
                 .unwrap()
                 .checked_ceil_div(amm.fees.swap_fee_denominator.into())
                 .unwrap()
@@ -3742,6 +3856,8 @@ impl Processor {
         let market_program_info = next_account_info(account_info_iter)?;
         let market_info = next_account_info(account_info_iter)?;
         let market_event_queue_info = next_account_info(account_info_iter)?;
+
+        let price_store = next_account_info(account_info_iter)?;
 
         let user_source_info = next_account_info(account_info_iter)?;
         let user_destination_info = next_account_info(account_info_iter)?;
@@ -3888,10 +4004,21 @@ impl Processor {
                 swap_direction,
             );
 
+            // Deduct fee here!!!
+            let price_store_data = PriceStore::load_checked(&price_store, program_id)?;
+            let clock = Clock::get()?;
+            let (swap_fee_percentage, _twap_price) = Self::calculate_dynamic_fee(
+                &price_store_data,
+                clock.unix_timestamp as u64,
+                total_pc_without_take_pnl,
+                total_coin_without_take_pnl,
+                amm.fees.swap_fee_denominator
+            );
+
             // swap_in_after_add_fee * (1 - 0.0025) = swap_in_before_add_fee
             // swap_in_after_add_fee = swap_in_before_add_fee / (1 - 0.0025)
             let swap_in_after_add_fee = swap_in_before_add_fee
-                .checked_mul(amm.fees.swap_fee_denominator.into())
+                .checked_mul(swap_fee_percentage.into())
                 .unwrap()
                 .checked_ceil_div(
                     (amm.fees

@@ -158,12 +158,13 @@ pub enum AmmInstruction {
     ///   12. `[writable]` AMM target orders Account. To store plan orders informations.
     ///   13. `[]` AMM config Account, derived from `find_program_address(&[&&AMM_CONFIG_SEED])`.
     ///   14. `[]` AMM create pool fee destination Account
-    ///   15. `[]` Market program id
-    ///   16. `[writable]` Market Account. Market program is the owner.
-    ///   17. `[writable, signer]` User wallet Account
-    ///   18. `[]` User token coin Account
-    ///   19. '[]` User token pc Account
-    ///   20. `[writable]` User destination lp token ATA Account
+    ///   15. `[writable]` Price store account 
+    ///   16. `[]` Market program id
+    ///   17. `[writable]` Market Account. Market program is the owner.
+    ///   18. `[writable, signer]` User wallet Account
+    ///   19. `[]` User token coin Account
+    ///   20. '[]` User token pc Account
+    ///   21. `[writable]` User destination lp token ATA Account
     Initialize2(InitializeInstruction2),
 
     ///   MonitorStep. To monitor place Amm order state machine turn around step by step.
@@ -328,9 +329,10 @@ pub enum AmmInstruction {
     ///   12. `[writable]` Market coin vault Account
     ///   13. `[writable]` Market pc vault Account
     ///   14. '[]` Market vault signer Account
-    ///   15. `[writable]` User source token Account.
-    ///   16. `[writable]` User destination token Account.
-    ///   17. `[signer]` User wallet Account
+    ///   15. `[writable]` Price store account
+    ///   16. `[writable]` User source token Account.
+    ///   17. `[writable]` User destination token Account.
+    ///   18. `[signer]` User wallet Account
     SwapBaseIn(SwapInstructionBaseIn),
 
     ///   Continue Initializes a new Amm pool because of compute units limit.
@@ -355,9 +357,10 @@ pub enum AmmInstruction {
     ///   12. `[writable]` Market coin vault Account
     ///   13. `[writable]` Market pc vault Account
     ///   14. '[]` Market vault signer Account
-    ///   15. `[writable]` User source token Account.
-    ///   16. `[writable]` User destination token Account.
-    ///   17. `[signer]` User wallet Account
+    ///   15. `[writable]` Price store account
+    ///   16. `[writable]` User source token Account.
+    ///   17. `[writable]` User destination token Account.
+    ///   18. `[signer]` User wallet Account
     SwapBaseOut(SwapInstructionBaseOut),
 
     SimulateInfo(SimulateInstruction),
@@ -855,6 +858,7 @@ pub fn initialize2(
     amm_pc_vault: &Pubkey,
     amm_target_orders: &Pubkey,
     amm_config: &Pubkey,
+    price_store: &Pubkey,
     create_fee_destination: &Pubkey,
     market_program: &Pubkey,
     market: &Pubkey,
@@ -893,6 +897,8 @@ pub fn initialize2(
         AccountMeta::new(*amm_target_orders, false),
         AccountMeta::new_readonly(*amm_config, false),
         AccountMeta::new(*create_fee_destination, false),
+        // dynamic price
+        AccountMeta::new(*price_store, true),
         // market
         AccountMeta::new_readonly(*market_program, false),
         AccountMeta::new_readonly(*market, false),
@@ -1057,6 +1063,7 @@ pub fn swap_base_in(
     market_coin_vault: &Pubkey,
     market_pc_vault: &Pubkey,
     market_vault_signer: &Pubkey,
+    price_store: &Pubkey,
     user_token_source: &Pubkey,
     user_token_destination: &Pubkey,
     user_source_owner: &Pubkey,
@@ -1089,6 +1096,8 @@ pub fn swap_base_in(
         AccountMeta::new(*market_coin_vault, false),
         AccountMeta::new(*market_pc_vault, false),
         AccountMeta::new_readonly(*market_vault_signer, false),
+        // price store
+        AccountMeta::new(*price_store, false),
         // user
         AccountMeta::new(*user_token_source, false),
         AccountMeta::new(*user_token_destination, false),
@@ -1118,6 +1127,7 @@ pub fn swap_base_out(
     market_coin_vault: &Pubkey,
     market_pc_vault: &Pubkey,
     market_vault_signer: &Pubkey,
+    price_store: &Pubkey,
     user_token_source: &Pubkey,
     user_token_destination: &Pubkey,
     user_source_owner: &Pubkey,
@@ -1150,6 +1160,8 @@ pub fn swap_base_out(
         AccountMeta::new(*market_coin_vault, false),
         AccountMeta::new(*market_pc_vault, false),
         AccountMeta::new_readonly(*market_vault_signer, false),
+        // price store
+        AccountMeta::new(*price_store, false),
         // user
         AccountMeta::new(*user_token_source, false),
         AccountMeta::new(*user_token_destination, false),
@@ -1504,6 +1516,7 @@ pub fn simulate_swap_base_in(
     market_program: &Pubkey,
     market: &Pubkey,
     market_event_queue: &Pubkey,
+    price_store: &Pubkey,
     user_token_source: &Pubkey,
     user_token_destination: &Pubkey,
     user_source_owner: &Pubkey,
@@ -1532,6 +1545,8 @@ pub fn simulate_swap_base_in(
         AccountMeta::new_readonly(*market_program, false),
         AccountMeta::new_readonly(*market, false),
         AccountMeta::new_readonly(*market_event_queue, false),
+        // price store
+        AccountMeta::new(*price_store, false),
         // user
         AccountMeta::new_readonly(*user_token_source, false),
         AccountMeta::new_readonly(*user_token_destination, false),

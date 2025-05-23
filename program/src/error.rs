@@ -197,6 +197,9 @@ pub enum AmmError {
     /// InvalidConfigAccount
     #[error("InvalidConfigAccount")]
     InvalidConfigAccount,
+    /// InvalidPriceStoreAccount
+    #[error("InvalidPriceStoreAccount")]
+    InvalidPriceStoreAccount,
 
     // 55
     /// RepeatCreateConfigAccount
@@ -300,6 +303,7 @@ impl PrintProgramError for AmmError {
             }
             AmmError::InvalidReferPCMint => msg!("Error: InvalidReferPCMint"),
             AmmError::InvalidConfigAccount => msg!("Error: InvalidConfigAccount"),
+            AmmError::InvalidPriceStoreAccount => msg!("Error: InvalidPriceStoreAccount"),
             AmmError::RepeatCreateConfigAccount => msg!("Error: RepeatCreateConfigAccount"),
             AmmError::MarketLotSizeIsTooLarge => msg!("Error: Market lotSize is too large"),
             AmmError::InitLpAmountTooLess => msg!("Error: Init lp amount is too less(Because 10**lp_decimals amount lp will be locked)"),

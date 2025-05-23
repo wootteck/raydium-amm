@@ -906,6 +906,54 @@ impl AmmConfig {
     }
 }
 
+/// State of price store account
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PriceStore {
+    /// last TWAP price: `pc` price in `coin` quote
+    pub last_twap_price: u64,
+    /// TWAP Period
+    pub twap_period: u64,
+    /// last timestamp
+    pub last_timestamp: u64,
+}
+impl_loadable!(PriceStore);
+
+impl PriceStore {
+    /// Helper function to get the more efficient packed size of the struct
+    /// load_mut_checked
+    #[inline]
+    pub fn load_mut_checked<'a>(
+        account: &'a AccountInfo,
+        program_id: &Pubkey,
+    ) -> Result<RefMut<'a, Self>, ProgramError> {
+        if account.owner != program_id {
+            return Err(AmmError::InvalidOwner.into());
+        }
+        if account.data_len() != size_of::<Self>() {
+            return Err(AmmError::ExpectedAccount.into());
+        }
+        let data = Self::load_mut(account)?;
+        Ok(data)
+    }
+
+    /// load_checked
+    #[inline]
+    pub fn load_checked<'a>(
+        account: &'a AccountInfo,
+        program_id: &Pubkey,
+    ) -> Result<Ref<'a, Self>, ProgramError> {
+        if account.owner != program_id {
+            return Err(AmmError::InvalidOwner.into());
+        }
+        if account.data_len() != size_of::<Self>() {
+            return Err(AmmError::ExpectedAccount.into());
+        }
+        let data = Self::load(account)?;
+        Ok(data)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LastOrderDistance {
